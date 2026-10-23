@@ -19,7 +19,30 @@ The minimum patched Node 22 release is 22.23.4. See the
 [Node.js security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
 and [Vercel advisory](https://vercel.com/kb/bulletin/node-js-security-advisory).
 
-## Build and verify locally
+## Publish with GitHub Actions
+
+The normal build runs on GitHub-hosted runners and does not use a developer's
+local Docker installation. In Actions, run **Publish Lighting Beetle Openinary**
+from `main`. It builds the full image on native amd64 and arm64 runners, verifies
+Node 22.23.4, SQLite and image transformation, then publishes to
+`ghcr.io/lightingbeetle/openinary` using the workflow's `GITHUB_TOKEN`.
+
+The workflow is manual. It does not build the API-only image or deploy to Coolify.
+It replaces the inherited Docker Hub publisher; no author registry credentials
+are needed. Action dependencies are pinned to commits.
+
+After the first publication, an organization/package administrator must set the
+GHCR package visibility to **Public** in its package settings. Publishing a
+package from a public repository does not make the package public automatically.
+Once public, it can be pulled anonymously without a registry token.
+
+The combined multi-platform image is tagged `node-22.23.4` and
+`sha-<full-source-commit>`. The workflow summary provides an immutable
+`ghcr.io/lightingbeetle/openinary@sha256:...` reference; use that digest for
+deployment. Architecture tags end in `-amd64` or `-arm64` and are intermediate
+outputs, not the combined image.
+
+## Optional local build and verification
 
 Run from the repository root:
 
@@ -40,9 +63,9 @@ Both version checks must print `v22.23.4`. Before deployment, also verify startu
 login, upload, media delivery and image/video transformations using disposable
 local data. Never point local checks at the production database or storage.
 
-These commands build local images; they do not publish an image or update Coolify.
-The inherited upstream publishing workflow targets the author's Docker Hub
-repositories and is not configured to publish Lighting Beetle images.
+These optional commands build local images; they do not publish an image or
+update Coolify. They can consume substantial RAM and disk space; prefer the
+GitHub Actions workflow above.
 
 The inherited API-only entrypoint invokes pnpm through Corepack as the `node`
 user. Its first startup may download pnpm from `registry.npmjs.org`; a container

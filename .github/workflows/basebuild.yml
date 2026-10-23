@@ -1,368 +1,150 @@
-name: basebuild
+name: Publish Lighting Beetle Openinary
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      # No bare '*.*.*': '*' matches everything but '/', so it swallowed every
-      # package tag too (ui-v0.6.0, core-v*, cli-v*) and rebuilt the image on
-      # each npm release. App releases are all 'vX.Y.Z', already covered above.
-      - 'v*'
-    paths:
-      - 'docker/**'
-      - 'apps/**'
-      - 'packages/**'
-      - '.github/workflows/basebuild.yml'
-      # These share the monorepo but ship nothing into the self-host images.
-      # Negations come last: GitHub applies the patterns in order.
-      - '!apps/cloud/**'
-      - '!apps/marketing/**'
-      - '!apps/telemetry/**'
-      - '!apps/docs/**'
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version tag (leave empty for latest)'
-        required: false
-        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-openinary
+  cancel-in-progress: false
 
 env:
-  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-  REGISTRY: docker.io
-  IMAGE_FULL: openinary/openinary
-  IMAGE_API: openinary/openinary-api
+  IMAGE: ghcr.io/lightingbeetle/openinary
 
 jobs:
-  determine-version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      is_release: ${{ steps.version.outputs.is_release }}
-      is_preview: ${{ steps.version.outputs.is_preview }}
-      major: ${{ steps.semver.outputs.major }}
-      minor: ${{ steps.semver.outputs.minor }}
-      patch: ${{ steps.semver.outputs.patch }}
-      major_minor: ${{ steps.semver.outputs.major_minor }}
-    steps:
-      - name: Determine version tag
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            if [ -n "${{ github.event.inputs.version }}" ]; then
-              echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-              echo "is_release=true" >> $GITHUB_OUTPUT
-              echo "is_preview=false" >> $GITHUB_OUTPUT
-            else
-              echo "version=latest" >> $GITHUB_OUTPUT
-              echo "is_release=false" >> $GITHUB_OUTPUT
-              echo "is_preview=false" >> $GITHUB_OUTPUT
-            fi
-          elif [ "${{ github.ref_type }}" == "tag" ]; then
-            # Remove 'refs/tags/' prefix
-            TAG_NAME=${GITHUB_REF#refs/tags/}
-            echo "version=$TAG_NAME" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-            echo "is_preview=false" >> $GITHUB_OUTPUT
-          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            # Push to main branch = preview build
-            echo "version=preview" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-            echo "is_preview=true" >> $GITHUB_OUTPUT
-          else
-            echo "version=latest" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-            echo "is_preview=false" >> $GITHUB_OUTPUT
-          fi
-          echo "Determined version: $(cat $GITHUB_OUTPUT | grep version | cut -d'=' -f2)"
-
-      - name: Extract major and minor version
-        id: semver
-        if: steps.version.outputs.is_release == 'true'
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          # Remove 'v' prefix if present
-          VERSION=${VERSION#v}
-          
-          # Extract major, minor, patch
-          MAJOR=$(echo $VERSION | cut -d. -f1)
-          MINOR=$(echo $VERSION | cut -d. -f2)
-          PATCH=$(echo $VERSION | cut -d. -f3)
-          
-          echo "major=$MAJOR" >> $GITHUB_OUTPUT
-          echo "minor=$MINOR" >> $GITHUB_OUTPUT
-          echo "patch=$PATCH" >> $GITHUB_OUTPUT
-          echo "major_minor=${MAJOR}.${MINOR}" >> $GITHUB_OUTPUT
-
-  build-full:
+  build:
+    if: github.repository == 'lightingbeetle/openinary' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    needs: determine-version
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Prepare platform pair
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          persist-credentials: false
 
-      - name: Build and push full image by digest
-        id: build
-        uses: docker/build-push-action@v5
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build full image on native runner
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: ./docker/full.Dockerfile
-          platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.IMAGE_FULL }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ env.IMAGE_FULL }}:buildcache-${{ env.PLATFORM_PAIR }}
-          cache-to: type=registry,ref=${{ env.IMAGE_FULL }}:buildcache-${{ env.PLATFORM_PAIR }},mode=max
+          file: docker/full.Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          pull: true
+          load: true
+          tags: openinary-verify:${{ github.sha }}
           build-args: |
-            IMAGE_TAG=${{ needs.determine-version.outputs.version }}
+            IMAGE_TAG=lb-node-22.23.4-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=openinary-full-${{ matrix.arch }}
+          cache-to: type=gha,scope=openinary-full-${{ matrix.arch }},mode=min
 
-      - name: Export digest
+      - name: Verify Node and native modules without network
+        env:
+          SOURCE_SHA: ${{ github.sha }}
         run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          docker run --rm --network none --entrypoint node \
+            --workdir /app/apps/api "openinary-verify:${SOURCE_SHA}" -e '
+              const assert = require("node:assert/strict");
+              assert.equal(process.version, "v22.23.4");
+              const Database = require("better-sqlite3");
+              const db = new Database(":memory:");
+              assert.equal(db.prepare("SELECT 42 AS value").get().value, 42);
+              db.close();
+              const sharp = require("/app/packages/core/node_modules/sharp");
+              sharp({ create: { width: 16, height: 12, channels: 3, background: "#336699" } })
+                .resize(8, 6).png().toBuffer({ resolveWithObject: true })
+                .then(({ info }) => {
+                  assert.equal(info.width, 8);
+                  assert.equal(info.height, 6);
+                  console.log("Node v22.23.4, SQLite and image transformation verified");
+                })
+                .catch(error => { console.error(error); process.exitCode = 1; });
+            '
 
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          name: digests-full-${{ env.PLATFORM_PAIR }}
-          path: /tmp/digests/*
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish verified architecture image
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          tag="${IMAGE}:sha-${SOURCE_SHA}-${ARCH}"
+          docker tag "openinary-verify:${SOURCE_SHA}" "$tag"
+          docker push "$tag"
+          mkdir -p /tmp/digests
+          docker image inspect "$tag" --format '{{index .RepoDigests 0}}' > /tmp/digests/image.txt
+          grep -Eq '^ghcr\.io/lightingbeetle/openinary@sha256:[a-f0-9]{64}$' /tmp/digests/image.txt
+
+      - name: Save immutable architecture reference
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/image.txt
           if-no-files-found: error
           retention-days: 1
 
-  merge-full:
-    runs-on: ubuntu-latest
-    needs: [determine-version, build-full]
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests/full
-          pattern: digests-full-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Create manifest list and push
-        working-directory: /tmp/digests/full
-        run: |
-          TAGS="-t ${{ env.IMAGE_FULL }}:${{ needs.determine-version.outputs.version }}"
-          if [ "${{ needs.determine-version.outputs.is_release }}" == "true" ]; then
-            TAGS="$TAGS -t ${{ env.IMAGE_FULL }}:latest"
-            TAGS="$TAGS -t ${{ env.IMAGE_FULL }}:${{ needs.determine-version.outputs.major_minor }}"
-            TAGS="$TAGS -t ${{ env.IMAGE_FULL }}:${{ needs.determine-version.outputs.major }}"
-          fi
-          docker buildx imagetools create $TAGS \
-            $(printf '${{ env.IMAGE_FULL }}@sha256:%s ' *)
-
-  build-api:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    needs: determine-version
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Prepare platform pair
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and push API image by digest
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./docker/api.Dockerfile
-          platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.IMAGE_API }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ env.IMAGE_API }}:buildcache-${{ env.PLATFORM_PAIR }}
-          cache-to: type=registry,ref=${{ env.IMAGE_API }}:buildcache-${{ env.PLATFORM_PAIR }},mode=max
-          build-args: |
-            IMAGE_TAG=${{ needs.determine-version.outputs.version }}
-
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-api-${{ env.PLATFORM_PAIR }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge-api:
-    runs-on: ubuntu-latest
-    needs: [determine-version, build-api]
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests/api
-          pattern: digests-api-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Create manifest list and push
-        working-directory: /tmp/digests/api
-        run: |
-          TAGS="-t ${{ env.IMAGE_API }}:${{ needs.determine-version.outputs.version }}"
-          if [ "${{ needs.determine-version.outputs.is_release }}" == "true" ]; then
-            TAGS="$TAGS -t ${{ env.IMAGE_API }}:latest"
-            TAGS="$TAGS -t ${{ env.IMAGE_API }}:${{ needs.determine-version.outputs.major_minor }}"
-            TAGS="$TAGS -t ${{ env.IMAGE_API }}:${{ needs.determine-version.outputs.major }}"
-          fi
-          docker buildx imagetools create $TAGS \
-            $(printf '${{ env.IMAGE_API }}@sha256:%s ' *)
-
-  summary:
-    runs-on: ubuntu-latest
-    needs: [determine-version, merge-full, merge-api]
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: write
+      contents: read
+      packages: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Download verified image references
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          fetch-depth: 0  # Fetch all history for changelog generation
+          pattern: digest-*
+          path: /tmp/digests
 
-      - name: Extract changelog for this version
-        id: changelog
-        if: needs.determine-version.outputs.is_release == 'true'
-        run: |
-          VERSION=${{ needs.determine-version.outputs.version }}
-          
-          # Extract the section for this version from CHANGELOG.md
-          if [ -f CHANGELOG.md ]; then
-            # Get content between [VERSION] and next version or end
-            CHANGELOG_CONTENT=$(sed -n "/## \[${VERSION#v}\]/,/## \[/p" CHANGELOG.md | sed '$d' | tail -n +2)
-            
-            # If empty, use default message
-            if [ -z "$CHANGELOG_CONTENT" ]; then
-              CHANGELOG_CONTENT="See [CHANGELOG.md](https://github.com/openinary/openinary/blob/main/CHANGELOG.md) for details."
-            fi
-            
-            # Write to file to preserve formatting
-            echo "$CHANGELOG_CONTENT" > /tmp/changelog.txt
-          else
-            echo "See commit history for changes." > /tmp/changelog.txt
-          fi
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Create GitHub Release
-        if: needs.determine-version.outputs.is_release == 'true'
-        uses: softprops/action-gh-release@v1
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          tag_name: ${{ needs.determine-version.outputs.version }}
-          name: Release ${{ needs.determine-version.outputs.version }}
-          body_path: /tmp/changelog.txt
-          draft: false
-          prerelease: ${{ contains(needs.determine-version.outputs.version, '-') }}
-          generate_release_notes: true
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish multi-platform image and deployment reference
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Summary
+          SOURCE_SHA: ${{ github.sha }}
         run: |
+          amd64=$(cat /tmp/digests/digest-amd64/image.txt)
+          arm64=$(cat /tmp/digests/digest-arm64/image.txt)
+          docker buildx imagetools create \
+            --tag "${IMAGE}:sha-${SOURCE_SHA}" \
+            --tag "${IMAGE}:node-22.23.4" \
+            "$amd64" "$arm64"
+          digest=$(docker buildx imagetools inspect "${IMAGE}:sha-${SOURCE_SHA}" --format '{{.Manifest.Digest}}')
           {
-            echo "## Docker Build Complete"
-            echo ""
-            
-            if [ "${{ needs.determine-version.outputs.is_preview }}" == "true" ]; then
-              echo "**Preview Build** (from main branch)"
-              echo ""
-            fi
-            
-            echo "**Build Version:** \`${{ needs.determine-version.outputs.version }}\`"
-            echo ""
-            
-            echo "### Images Built"
-            echo "- Full stack image (linux/amd64, linux/arm64)"
-            echo "- API-only image (linux/amd64, linux/arm64)"
-            echo ""
-            
-            if [ "${{ needs.determine-version.outputs.is_release }}" == "true" ]; then
-              echo "**Tags created:**"
-              echo "- Version tag: \`${{ needs.determine-version.outputs.version }}\`"
-              echo "- Latest tag: \`latest\`"
-              echo "- Major.Minor tag: \`${{ needs.determine-version.outputs.major_minor }}\`"
-              echo "- Major tag: \`${{ needs.determine-version.outputs.major }}\`"
-              echo ""
-              echo "**GitHub Release created:** https://github.com/${{ github.repository }}/releases/tag/${{ needs.determine-version.outputs.version }}"
-            else
-              echo "**Tag created:** \`${{ needs.determine-version.outputs.version }}\`"
-            fi
-            echo ""
-            echo "Images are available on Docker Hub."
-          } >> $GITHUB_STEP_SUMMARY
+            echo '## Deployment image'
+            echo "\`${IMAGE}@${digest}\`"
+            echo ''
+            echo 'Both linux/amd64 and linux/arm64 passed Node and native-module checks.'
+            echo 'For a newly created GHCR package, set package visibility to Public before anonymous pulls.'
+            echo 'Coolify is not changed by this workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"
